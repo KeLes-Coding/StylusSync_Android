@@ -4,6 +4,7 @@ import android.content.Context;
 import android.os.Environment;
 import android.util.Log;
 
+import com.example.stylussync.AppExecutors;
 import com.example.stylussync.data.Stroke;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
@@ -20,17 +21,20 @@ public class FileRepository {
     private static final String TAG = "FileRepository";
     private final Context context;
     private final Gson gson;
+    private final AppExecutors executors;
+
+    // 回调接口
+    public interface RepositoryCallback<T> {
+        void onComplete(T result);
+    }
 
     public FileRepository(Context context) {
         this.context = context;
         this.gson = new Gson();
+        this.executors = AppExecutors.getInstance();
     }
 
-    // 获取存储绘图文件的目录
     private File getStorageDir() {
-        // 使用 getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-        // 将文件保存在应用的专属外部存储区域的 Documents 目录下。
-        // 这样做不需要额外的存储权限，且应用卸载后文件会自动删除。
         File dir = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "StylusSync_Drawings");
         if (!dir.exists()) {
             if (!dir.mkdirs()) {
@@ -40,44 +44,65 @@ public class FileRepository {
         return dir;
     }
 
-    // 保存绘图
-    public boolean saveDrawing(List<Stroke> strokes, String fileName) {
-        if (!fileName.toLowerCase().endsWith(".json")) {
-            fileName += ".json";
-        }
-        File file = new File(getStorageDir(), fileName);
-        String json = gson.toJson(strokes);
-
-        try (FileWriter writer = new FileWriter(file)) {
-            writer.write(json);
-            Log.d(TAG, "Drawing saved successfully to " + file.getAbsolutePath());
-            return true;
-        } catch (IOException e) {
-            Log.e(TAG, "Error saving drawing", e);
-            return false;
-        }
+    // 异步保存绘图
+    public void saveDrawing(List<Stroke> strokes, String fileName, RepositoryCallback<Boolean> callback) {
+        executors.diskIO().execute(() -> {
+            String finalFileName = fileName.toLowerCase().endsWith(".json") ? fileName : fileName + ".json";
+            File file = new File(getStorageDir(), finalFileName);
+            String json = gson.toJson(strokes);
+            boolean success = false;
+            try (FileWriter writer = new FileWriter(file)) {
+                writer.write(json);
+                Log.d(TAG, "Drawing saved successfully to " + file.getAbsolutePath());
+                success = true;
+            } catch (IOException e) {
+                Log.e(TAG, "Error saving drawing", e);
+            }
+            final boolean result = success;
+            executors.mainThread().execute(() -> callback.onComplete(result));
+        });
     }
 
-    // 加载绘图
-    public List<Stroke> loadDrawing(String fileName) {
-        File file = new File(getStorageDir(), fileName);
-        if (!file.exists()) {
-            Log.e(TAG, "File not found: " + fileName);
-            return null;
-        }
+    // 异步加载绘图
+    public void loadDrawing(String fileName, RepositoryCallback<List<Stroke>> callback) {
+        executors.diskIO().execute(() -> {
+            File file = new File(getStorageDir(), fileName);
+            if (!file.exists()) {
+                Log.e(TAG, "File not found: " + fileName);
+                executors.mainThread().execute(() -> callback.onComplete(null));
+                return;
+            }
 
-        try (FileReader reader = new FileReader(file)) {
-            Type strokeListType = new TypeToken<List<Stroke>>() {}.getType();
-            return gson.fromJson(reader, strokeListType);
-        } catch (IOException e) {
-            Log.e(TAG, "Error loading drawing", e);
-            return null;
-        }
+            List<Stroke> strokes = null;
+            try (FileReader reader = new FileReader(file)) {
+                Type strokeListType = new TypeToken<List<Stroke>>() {}.getType();
+                strokes = gson.fromJson(reader, strokeListType);
+            } catch (Exception e) { // 捕获更广泛的异常，如JsonSyntaxException
+                Log.e(TAG, "Error loading or parsing drawing", e);
+            }
+            final List<Stroke> result = strokes;
+            executors.mainThread().execute(() -> callback.onComplete(result));
+        });
     }
 
-    // 列出所有已保存的绘图文件名
-    public String[] listDrawingFiles() {
-        File dir = getStorageDir();
-        return dir.list((d, name) -> name.toLowerCase().endsWith(".json"));
+    // 异步列出所有已保存的绘图文件名
+    public void listDrawingFiles(RepositoryCallback<String[]> callback) {
+        executors.diskIO().execute(() -> {
+            File dir = getStorageDir();
+            String[] fileList = dir.list((d, name) -> name.toLowerCase().endsWith(".json"));
+            executors.mainThread().execute(() -> callback.onComplete(fileList));
+        });
+    }
+
+    public void deleteDrawing(String fileName, RepositoryCallback<Boolean> callback) {
+        executors.diskIO().execute(() -> {
+            File file = new File(getStorageDir(), fileName);
+            boolean success = false;
+            if (file.exists()) {
+                success = file.delete();
+            }
+            final boolean result = success;
+            executors.mainThread().execute(() -> callback.onComplete(result));
+        });
     }
 }

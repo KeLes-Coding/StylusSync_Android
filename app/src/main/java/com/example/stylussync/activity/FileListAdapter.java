@@ -1,13 +1,16 @@
+// 替换文件：app/src/main/java/com/example/stylussync/activity/FileListAdapter.java
 package com.example.stylussync.activity;
 
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ImageButton;
 import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 import com.example.stylussync.R;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class FileListAdapter extends RecyclerView.Adapter<FileListAdapter.FileViewHolder> {
@@ -17,6 +20,7 @@ public class FileListAdapter extends RecyclerView.Adapter<FileListAdapter.FileVi
 
     public interface OnItemClickListener {
         void onItemClick(String fileName);
+        void onDeleteClick(String fileName, int position);
     }
 
     public void setOnItemClickListener(OnItemClickListener listener) {
@@ -39,6 +43,11 @@ public class FileListAdapter extends RecyclerView.Adapter<FileListAdapter.FileVi
                 listener.onItemClick(fileName);
             }
         });
+        holder.deleteButton.setOnClickListener(v -> {
+            if (listener != null) {
+                listener.onDeleteClick(fileName, holder.getAdapterPosition());
+            }
+        });
     }
 
     @Override
@@ -49,17 +58,26 @@ public class FileListAdapter extends RecyclerView.Adapter<FileListAdapter.FileVi
     public void setFiles(String[] files) {
         this.fileList.clear();
         if (files != null) {
-            java.util.Collections.addAll(this.fileList, files);
+            Collections.addAll(this.fileList, files);
         }
         notifyDataSetChanged();
     }
 
+    public void removeItem(int position) {
+        if (position >= 0 && position < fileList.size()) {
+            fileList.remove(position);
+            notifyItemRemoved(position);
+        }
+    }
+
     static class FileViewHolder extends RecyclerView.ViewHolder {
         TextView fileNameTextView;
+        ImageButton deleteButton;
 
         FileViewHolder(@NonNull View itemView) {
             super(itemView);
             fileNameTextView = itemView.findViewById(R.id.text_view_filename);
+            deleteButton = itemView.findViewById(R.id.btn_delete_file);
         }
     }
 }

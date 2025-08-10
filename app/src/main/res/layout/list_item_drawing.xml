@@ -9,12 +9,30 @@
     android:layout_marginBottom="4dp"
     app:cardCornerRadius="8dp">
 
-    <TextView
-        android:id="@+id/text_view_filename"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="16dp"
-        android:textSize="18sp"
-        android:text="Drawing_20250808.json" />
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/text_view_filename"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:padding="16dp"
+            android:textSize="18sp"
+            android:text="Drawing_20250808.json" />
+
+        <ImageButton
+            android:id="@+id/btn_delete_file"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:src="@android:drawable/ic_menu_delete"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="16dp"
+            android:contentDescription="删除文件"
+            app:tint="?android:attr/textColorSecondary" />
+    </LinearLayout>
 
 </com.google.android.material.card.MaterialCardView>

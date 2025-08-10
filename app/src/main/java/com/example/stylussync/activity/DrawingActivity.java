@@ -33,11 +33,12 @@ public class DrawingActivity extends AppCompatActivity
 
     // UI & View
     private DrawingSurfaceView drawingSurfaceView;
-    private Button btnEraser;
+    private Button btnEraser, btnUndo, btnRedo, btnSave;
     private TextView textViewStatus;
 
     // State
     private boolean isEraserActive = false;
+    private String mCurrentFileName = null; // 用于跟踪当前文件名
 
     // Modules
     private FileRepository fileRepository;
@@ -65,45 +66,36 @@ public class DrawingActivity extends AppCompatActivity
         SeekBar seekBarStrokeWidth = findViewById(R.id.seekbar_stroke_width);
         btnEraser = findViewById(R.id.btn_eraser);
         Button btnClear = findViewById(R.id.btn_clear);
-        Button btnSave = findViewById(R.id.btn_save);
+        btnSave = findViewById(R.id.btn_save);
+        Button btnSaveAs = findViewById(R.id.btn_save_as);
+        btnUndo = findViewById(R.id.btn_undo);
+        btnRedo = findViewById(R.id.btn_redo);
 
         // 设置绘图视图的回调
         drawingSurfaceView.setCallback(this);
 
         // --- 设置监听器 ---
         btnConnect.setOnClickListener(v -> showConnectDialog());
-
-        btnColorBlack.setOnClickListener(v -> {
-            resetEraserMode();
-            drawingSurfaceView.setPenColor(Color.BLACK);
-        });
-        btnColorRed.setOnClickListener(v -> {
-            resetEraserMode();
-            drawingSurfaceView.setPenColor(Color.RED);
-        });
-        btnColorBlue.setOnClickListener(v -> {
-            resetEraserMode();
-            drawingSurfaceView.setPenColor(Color.BLUE);
-        });
-
+        btnColorBlack.setOnClickListener(v -> drawingSurfaceView.setPenColor(Color.BLACK));
+        btnColorRed.setOnClickListener(v -> drawingSurfaceView.setPenColor(Color.RED));
+        btnColorBlue.setOnClickListener(v -> drawingSurfaceView.setPenColor(Color.BLUE));
         btnClear.setOnClickListener(v -> {
             drawingSurfaceView.clearCanvas();
             sendControlMessage("clear_canvas");
         });
-
         btnEraser.setOnClickListener(v -> {
             isEraserActive = !isEraserActive;
             drawingSurfaceView.setEraserMode(isEraserActive);
-            if (isEraserActive) {
-                btnEraser.setText("画笔");
-                btnEraser.setBackgroundColor(Color.LTGRAY);
-            } else {
-                btnEraser.setText("橡皮擦");
-                btnEraser.setBackgroundColor(Color.TRANSPARENT);
-            }
+            updateEraserButtonUI();
         });
 
-        btnSave.setOnClickListener(v -> showSaveDialog());
+        // 保存与另存为
+        btnSave.setOnClickListener(v -> saveCurrentFile(false));
+        btnSaveAs.setOnClickListener(v -> saveCurrentFile(true));
+
+        // 撤销与重做
+        btnUndo.setOnClickListener(v -> drawingSurfaceView.undo());
+        btnRedo.setOnClickListener(v -> drawingSurfaceView.redo());
 
         seekBarStrokeWidth.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -120,16 +112,46 @@ public class DrawingActivity extends AppCompatActivity
         // 检查是否有文件需要加载
         Intent intent = getIntent();
         if (intent != null && intent.hasExtra(FileListActivity.EXTRA_FILENAME)) {
-            String fileName = intent.getStringExtra(FileListActivity.EXTRA_FILENAME);
-            setTitle(fileName);
-            List<Stroke> strokes = fileRepository.loadDrawing(fileName);
-            if (strokes != null) {
-                drawingSurfaceView.setStrokes(strokes);
-            } else {
-                Toast.makeText(this, "加载文件失败: " + fileName, Toast.LENGTH_LONG).show();
-            }
+            mCurrentFileName = intent.getStringExtra(FileListActivity.EXTRA_FILENAME);
+            setTitle("加载中...");
+            fileRepository.loadDrawing(mCurrentFileName, strokes -> {
+                if (strokes != null) {
+                    setTitle(mCurrentFileName);
+                    drawingSurfaceView.setStrokes(strokes);
+                } else {
+                    mCurrentFileName = null;
+                    setTitle("加载失败");
+                    Toast.makeText(this, "加载文件失败", Toast.LENGTH_LONG).show();
+                }
+            });
         } else {
             setTitle("新建绘图");
+        }
+    }
+
+    private void saveCurrentFile(boolean forceSaveAs) {
+        if (mCurrentFileName != null && !forceSaveAs) {
+            // 直接保存到当前文件
+            fileRepository.saveDrawing(drawingSurfaceView.getStrokes(), mCurrentFileName, success -> {
+                if (success) {
+                    Toast.makeText(this, "已保存: " + mCurrentFileName, Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show();
+                }
+            });
+        } else {
+            // 另存为或首次保存
+            showSaveAsDialog();
+        }
+    }
+
+    private void updateEraserButtonUI() {
+        if (isEraserActive) {
+            btnEraser.setText("画笔");
+            btnEraser.setBackgroundColor(Color.LTGRAY);
+        } else {
+            btnEraser.setText("橡皮擦");
+            btnEraser.setBackgroundColor(Color.TRANSPARENT);
         }
     }
 
@@ -137,6 +159,12 @@ public class DrawingActivity extends AppCompatActivity
     public void onNewStroke(Stroke stroke) {
         Log.d(TAG, "New stroke finished. Points: " + stroke.points.size());
         sendDrawMessage(stroke);
+    }
+
+    @Override
+    public void onHistoryChanged(boolean canUndo, boolean canRedo) {
+        btnUndo.setEnabled(canUndo);
+        btnRedo.setEnabled(canRedo);
     }
 
     @Override
@@ -161,9 +189,9 @@ public class DrawingActivity extends AppCompatActivity
         builder.show();
     }
 
-    private void showSaveDialog() {
+    private void showSaveAsDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("保存绘图");
+        builder.setTitle("另存为");
         final EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
         String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
@@ -176,12 +204,16 @@ public class DrawingActivity extends AppCompatActivity
                 Toast.makeText(this, "文件名不能为空", Toast.LENGTH_SHORT).show();
                 return;
             }
-            boolean success = fileRepository.saveDrawing(drawingSurfaceView.getStrokes(), fileName);
-            if (success) {
-                Toast.makeText(this, "保存成功: " + fileName + ".json", Toast.LENGTH_SHORT).show();
-            } else {
-                Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show();
-            }
+            fileRepository.saveDrawing(drawingSurfaceView.getStrokes(), fileName, success -> {
+                if (success) {
+                    String finalFileName = fileName.toLowerCase().endsWith(".json") ? fileName : fileName + ".json";
+                    mCurrentFileName = finalFileName;
+                    setTitle(mCurrentFileName);
+                    Toast.makeText(this, "保存成功: " + mCurrentFileName, Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show();
+                }
+            });
         });
         builder.setNegativeButton("取消", (dialog, which) -> dialog.cancel());
         builder.show();
@@ -200,20 +232,11 @@ public class DrawingActivity extends AppCompatActivity
     private void sendControlMessage(String event) {
         class ControlMessage {
             final String type = "control";
-            final String event_name; // 为了避免与Java关键字冲突，可以使用不同的命名
+            final String event_name;
             ControlMessage(String e) { this.event_name = e; }
         }
         String json = gson.toJson(new ControlMessage(event));
         webSocketClient.send(json);
-    }
-
-    private void resetEraserMode() {
-        if (isEraserActive) {
-            isEraserActive = false;
-            drawingSurfaceView.setEraserMode(false);
-            btnEraser.setText("橡皮擦");
-            btnEraser.setBackgroundColor(Color.TRANSPARENT);
-        }
     }
 
     @Override

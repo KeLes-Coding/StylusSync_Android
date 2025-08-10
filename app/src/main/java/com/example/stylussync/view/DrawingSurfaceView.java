@@ -1,3 +1,5 @@
+// 替换文件：app/src/main/java/com/example/stylussync/view/DrawingSurfaceView.java
+
 package com.example.stylussync.view;
 
 import android.content.Context;
@@ -17,44 +19,41 @@ import androidx.annotation.NonNull;
 import com.example.stylussync.data.Point;
 import com.example.stylussync.data.Stroke;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Callback, Runnable {
 
-    // 绘图线程控制
     private SurfaceHolder mHolder;
     private Thread mDrawThread;
     private boolean mIsDrawing = false;
 
-    // 画布与画笔
     private Bitmap mBitmap;
     private Canvas mBitmapCanvas;
     private final Paint mPaint;
     private final Paint mEraserPaint;
     private Path mCurrentPath;
 
-    // 数据
-    // 使用 CopyOnWriteArrayList 可以在遍历时安全地修改，避免多线程冲突
-    private final List<Stroke> mStrokes = new CopyOnWriteArrayList<>();
+    private final Deque<Stroke> mUndoStack = new ArrayDeque<>();
+    private final Deque<Stroke> mRedoStack = new ArrayDeque<>();
     private Stroke mCurrentStroke;
 
-    // 绘图属性
     private int mCurrentColor = Color.BLACK;
     private float mCurrentBaseStrokeWidth = 10f;
     private boolean mIsEraserMode = false;
 
-    // 回调接口，用于通知 Activity 数据变化
     public interface DrawingCallback {
         void onNewStroke(Stroke stroke);
+        void onHistoryChanged(boolean canUndo, boolean canRedo);
     }
     private DrawingCallback mCallback;
-
 
     public DrawingSurfaceView(Context context, AttributeSet attrs) {
         super(context, attrs);
         init();
+
         mPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         mPaint.setStyle(Paint.Style.STROKE);
         mPaint.setStrokeCap(Paint.Cap.ROUND);
@@ -64,7 +63,6 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         mEraserPaint.setStyle(Paint.Style.STROKE);
         mEraserPaint.setStrokeCap(Paint.Cap.ROUND);
         mEraserPaint.setStrokeJoin(Paint.Join.ROUND);
-        // 关键：设置橡皮擦混合模式
         mEraserPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.CLEAR));
     }
 
@@ -75,28 +73,18 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         setFocusableInTouchMode(true);
     }
 
-    public void setCallback(DrawingCallback callback) {
-        this.mCallback = callback;
-    }
-
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        // 只处理触控笔事件
         if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) {
             return super.onTouchEvent(event);
         }
 
-        // 检查触控笔副按钮状态，切换橡皮擦
-        if ((event.getButtonState() & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0) {
-            setEraserMode(true);
-        } else {
-            setEraserMode(false);
-        }
+        // 检查橡皮擦按钮，切换模式
+        setEraserMode((event.getButtonState() & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0);
 
         float x = event.getX();
         float y = event.getY();
         float pressure = event.getPressure();
-
         Point point = new Point(x, y, pressure);
 
         switch (event.getAction()) {
@@ -105,19 +93,27 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
                 mCurrentPath.moveTo(x, y);
                 mCurrentStroke = new Stroke(mCurrentColor, mCurrentBaseStrokeWidth, mIsEraserMode);
                 mCurrentStroke.addPoint(point);
+                mRedoStack.clear();
+                updateHistoryState();
                 break;
+
             case MotionEvent.ACTION_MOVE:
-                if (mCurrentPath != null) {
-                    mCurrentPath.lineTo(x, y);
+                if (mCurrentPath != null && mCurrentStroke != null) {
+                    Point lastPoint = mCurrentStroke.points.get(mCurrentStroke.points.size() - 1);
+                    mCurrentPath.quadTo(lastPoint.x, lastPoint.y, (x + lastPoint.x) / 2, (y + lastPoint.y) / 2);
                     mCurrentStroke.addPoint(point);
                 }
                 break;
+
             case MotionEvent.ACTION_UP:
-                if (mCurrentStroke != null) {
-                    mStrokes.add(mCurrentStroke);
+                if (mCurrentPath != null && mCurrentStroke != null) {
+                    mCurrentStroke.addPoint(point);
+                    mUndoStack.push(mCurrentStroke);
+                    commitStrokeToBitmap(mCurrentStroke); // 将完成的笔画固化到位图
                     if (mCallback != null) {
-                        mCallback.onNewStroke(mCurrentStroke); // 通知 Activity 新笔画已完成
+                        mCallback.onNewStroke(mCurrentStroke);
                     }
+                    updateHistoryState();
                 }
                 mCurrentPath = null;
                 mCurrentStroke = null;
@@ -133,13 +129,10 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
             try {
                 canvas = mHolder.lockCanvas();
                 if (canvas != null) {
-                    // 1. 清空屏幕
                     canvas.drawColor(Color.WHITE);
-                    // 2. 将之前保存的笔画绘制到 Bitmap 上
-                    drawStrokesToBitmap();
-                    // 3. 将 Bitmap 绘制到主画布
-                    canvas.drawBitmap(mBitmap, 0, 0, null);
-                    // 4. 绘制当前正在画的路径
+                    if (mBitmap != null) {
+                        canvas.drawBitmap(mBitmap, 0, 0, null);
+                    }
                     drawCurrentPath(canvas);
                 }
             } finally {
@@ -150,63 +143,86 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         }
     }
 
-    private void drawStrokesToBitmap() {
-        if (mBitmap == null) {
-            mBitmap = Bitmap.createBitmap(getWidth(), getHeight(), Bitmap.Config.ARGB_8888);
-            mBitmapCanvas = new Canvas(mBitmap);
+    // [最终修复] 提交笔画到位图的核心逻辑
+    private void commitStrokeToBitmap(Stroke stroke) {
+        if (mBitmapCanvas == null || stroke == null || stroke.points == null || stroke.points.size() < 2) {
+            return;
         }
-        // 清空 Bitmap 画布
-        mBitmapCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
 
-        for (Stroke stroke : mStrokes) {
-            Paint paintToUse = stroke.isEraser ? mEraserPaint : mPaint;
+        // 1. 根据是否为橡皮擦模式选择画笔
+        Paint paintToUse = stroke.isEraser ? mEraserPaint : mPaint;
+        if (!stroke.isEraser) {
+            paintToUse.setColor(stroke.color);
+        }
 
-            // [修改] 只在不是橡皮擦模式时才设置颜色
-            if (!stroke.isEraser) {
-                paintToUse.setColor(stroke.color);
-            }
+        List<Point> points = stroke.points;
 
-            Path path = new Path();
-            List<Point> points = stroke.points;
-            if (points.size() > 1) { // 至少需要两个点才能形成路径
-                path.moveTo(points.get(0).x, points.get(0).y);
-                // 从第二个点开始循环
-                for (int i = 1; i < points.size(); i++) {
-                    Point p1 = points.get(i - 1);
-                    Point p2 = points.get(i);
+        // 2. 迭代笔画中的所有点，分段绘制
+        // 这种分段绘制并动态调整宽度的经典方法，能同时保证笔画连续和压感有效
+        for (int i = 1; i < points.size(); i++) {
+            Point p1 = points.get(i - 1);
+            Point p2 = points.get(i);
 
-                    // 设置每个点的笔触宽度
-                    paintToUse.setStrokeWidth(p2.pressure * stroke.baseStrokeWidth);
+            // 3. 根据压力计算笔画宽度
+            paintToUse.setStrokeWidth(p1.pressure * stroke.baseStrokeWidth);
 
-                    // 使用贝塞尔曲线使线条平滑
-                    path.quadTo(p1.x, p1.y, (p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
-
-                    // 在每个小段上绘制，以体现压力变化
-                    mBitmapCanvas.drawPath(path, paintToUse);
-
-                    // 为下一次绘制重置路径起点
-                    path.moveTo((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
-                }
-            }
+            // 4. 绘制从 p1 到 p2 的一小段路径
+            mBitmapCanvas.drawLine(p1.x, p1.y, p2.x, p2.y, paintToUse);
         }
     }
+
 
     private void drawCurrentPath(Canvas canvas) {
         if (mCurrentPath != null && mCurrentStroke != null) {
             Paint paintToUse = mIsEraserMode ? mEraserPaint : mPaint;
-            paintToUse.setColor(mCurrentColor);
-            // 根据最后一点的压力值设置笔触宽度
-            if (!mCurrentStroke.points.isEmpty()){
-                float lastPressure = mCurrentStroke.points.get(mCurrentStroke.points.size()-1).pressure;
-                paintToUse.setStrokeWidth(lastPressure * mCurrentBaseStrokeWidth);
-            } else {
-                paintToUse.setStrokeWidth(mCurrentBaseStrokeWidth);
+            if (!mIsEraserMode) {
+                paintToUse.setColor(mCurrentColor);
             }
+            // 实时预览时使用固定的基础宽度，以保证性能
+            paintToUse.setStrokeWidth(mCurrentBaseStrokeWidth);
             canvas.drawPath(mCurrentPath, paintToUse);
         }
     }
 
+    // 重绘所有笔画（用于撤销或加载文件）
+    private void redrawAllStrokes() {
+        if (mBitmapCanvas != null) {
+            // 清空画布
+            mBitmapCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+            // 重新绘制所有在撤销栈中的笔画
+            // 必须从栈底向上（FIFO）绘制，才能保证笔画叠加顺序正确
+            for (Stroke stroke : new ArrayList<>(mUndoStack)) {
+                commitStrokeToBitmap(stroke);
+            }
+        }
+    }
 
+    // --- 撤销/重做/历史记录管理 ---
+
+    public void undo() {
+        if (!mUndoStack.isEmpty()) {
+            mRedoStack.push(mUndoStack.pop());
+            redrawAllStrokes();
+            updateHistoryState();
+        }
+    }
+
+    public void redo() {
+        if (!mRedoStack.isEmpty()) {
+            Stroke redoneStroke = mRedoStack.pop();
+            mUndoStack.push(redoneStroke);
+            commitStrokeToBitmap(redoneStroke); // 重做时只需将笔画绘制在最上层
+            updateHistoryState();
+        }
+    }
+
+    private void updateHistoryState() {
+        if (mCallback != null) {
+            mCallback.onHistoryChanged(!mUndoStack.isEmpty(), !mRedoStack.isEmpty());
+        }
+    }
+
+    // --- SurfaceView 生命周期方法 ---
     @Override
     public void surfaceCreated(@NonNull SurfaceHolder holder) {
         mIsDrawing = true;
@@ -216,14 +232,12 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     @Override
     public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
-        // 如果尺寸变化，需要重建 Bitmap
         if (mBitmap != null) {
             mBitmap.recycle();
         }
         mBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         mBitmapCanvas = new Canvas(mBitmap);
-        // 重绘所有
-        drawStrokesToBitmap();
+        redrawAllStrokes();
     }
 
     @Override
@@ -238,15 +252,22 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
 
     // --- 公共控制方法 ---
 
+    public void setCallback(DrawingCallback callback) {
+        this.mCallback = callback;
+    }
+
     public void clearCanvas() {
-        mStrokes.clear();
-        if (mBitmap != null) {
+        mUndoStack.clear();
+        mRedoStack.clear();
+        if (mBitmapCanvas != null) {
             mBitmapCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
         }
+        updateHistoryState();
     }
 
     public void setPenColor(int color) {
         this.mCurrentColor = color;
+        this.mIsEraserMode = false; // 选择颜色时，自动退出橡皮擦模式
     }
 
     public void setStrokeWidth(float width) {
@@ -258,13 +279,16 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
     }
 
     public List<Stroke> getStrokes() {
-        return this.mStrokes;
+        return new ArrayList<>(mUndoStack);
     }
 
     public void setStrokes(List<Stroke> strokes) {
-        this.mStrokes.clear();
-        this.mStrokes.addAll(strokes);
-        // 强制重绘
-        drawStrokesToBitmap();
+        mUndoStack.clear();
+        mRedoStack.clear();
+        if (strokes != null) {
+            mUndoStack.addAll(strokes);
+        }
+        redrawAllStrokes();
+        updateHistoryState();
     }
 }
