@@ -80,7 +80,7 @@ public class DrawingSurfaceView extends SurfaceView implements SurfaceHolder.Cal
         }
 
         // 检查橡皮擦按钮，切换模式
-        setEraserMode((event.getButtonState() & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0);
+//        setEraserMode((event.getButtonState() & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0);
 
         float x = event.getX();
         float y = event.getY();
